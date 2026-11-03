@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buscador con Árbol de Sufijos</title>
+<style>
+  :root{
+    --bg:#f7f7f5; --card:#ffffff; --ink:#1d1d1f; --muted:#6b6b70; --line:#d9d9de;
+    --red:#d32f2f; --redbg:#fde3e3; --leaf:#e8eefc; --node:#ececf0; --accent:#2f5fd3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#17171a; --card:#222226; --ink:#ececf0; --muted:#9a9aa3; --line:#3a3a42;
+      --red:#ff6b6b; --redbg:#4a2326; --leaf:#26324f; --node:#34343b; --accent:#7ea2ff; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  main{max-width:980px;margin:0 auto;padding:20px 16px 48px}
+  h1{font-size:1.5rem;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+  label{display:block;font-weight:600;font-size:.9rem;margin-bottom:6px}
+  textarea,input[type=text]{width:100%;font:inherit;color:var(--ink);background:var(--bg);
+    border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  textarea{min-height:84px;resize:vertical}
+  input[type=text]{font-size:1.1rem}
+  textarea:focus,input:focus{outline:2px solid var(--accent);outline-offset:1px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px}
+  .chip{border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:999px;
+    padding:3px 12px;font:inherit;font-size:.85rem;cursor:pointer}
+  .chip:hover{border-color:var(--accent)}
+  .check{font-weight:400;display:inline-flex;gap:6px;align-items:center;margin:0}
+  #result{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;
+    font-size:1.05rem;line-height:1.7}
+  mark{background:var(--redbg);color:var(--red);font-weight:700;border-radius:3px;padding:0 1px}
+  .stats{color:var(--muted);font-size:.9rem;margin-top:8px}
+  .stats b{color:var(--ink)}
+  #treewrap{overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:6px}
+  svg text{fill:var(--ink);font-family:ui-monospace,Menlo,Consolas,monospace}
+  .edge{stroke:var(--muted);stroke-width:1.3;fill:none}
+  .edge.hit{stroke:var(--red);stroke-width:2.6}
+  .elabel{font-size:12px;paint-order:stroke;stroke:var(--bg);stroke-width:4px}
+  .elabel.hit{fill:var(--red);font-weight:700}
+  .nint{fill:var(--node);stroke:var(--muted)}
+  .nint.hit{fill:var(--red);stroke:var(--red)}
+  .nleaf{fill:var(--leaf);stroke:var(--accent)}
+  .nleaf.hit{fill:var(--redbg);stroke:var(--red);stroke-width:2}
+  .lnum{font-size:12px;text-anchor:middle;dominant-baseline:central}
+  .note{color:var(--muted);font-size:.9rem}
+</style>
+</head>
+<body>
+<main>
+  <h1>Buscador con Árbol de Sufijos</h1>
+  <p class="sub">Construye el árbol de sufijos del texto, desciende por él con el patrón y marca en rojo cada ocurrencia.</p>
+
+  <div class="card">
+    <label for="txt">Texto</label>
+    <textarea id="txt" spellcheck="false">escape escuela esperar</textarea>
+    <div class="row">
+      <span class="note">Ejemplos:</span>
+      <button class="chip" data-t="escape escuela esperar" data-p="es">escape</button>
+      <button class="chip" data-t="banana" data-p="ana">banana</button>
+      <button class="chip" data-t="mississippi" data-p="issi">mississippi</button>
+      <button class="chip" data-t="abracadabra" data-p="abra">abracadabra</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <label for="pat">Patrón a buscar</label>
+    <input id="pat" type="text" value="es" autocomplete="off" spellcheck="false">
+    <div class="row">
+      <label class="check"><input type="checkbox" id="ci" checked> Ignorar mayúsculas</label>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>Resultado</label>
+    <div id="result" aria-live="polite"></div>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="card">
+    <label>Árbol de sufijos <span class="note" id="treenote"></span></label>
+    <div id="treewrap"><svg id="svg" role="img" aria-label="Árbol de sufijos del texto"></svg></div>
+    <p class="note" style="margin:8px 0 0">Las hojas muestran la posición (desde 0) donde empieza cada sufijo. <b style="color:var(--red)">Rojo</b>: camino recorrido por el patrón y hojas encontradas. <code>$</code> es el terminador.</p>
+  </div>
+</main>
+
+<script>
+(function (root) {
+  'use strict';
+  var SENT = '\u0001';
+
+  /* ---------- Núcleo: árbol de sufijos ---------- */
+  function Node(start, end) {
+    this.start = start; this.end = end;
+    this.kids = new Map(); this.suffix = -1;
+  }
+
+  // Construcción por inserción de cada sufijo (O(n^2) en el peor caso; suficiente para la demo).
+  function build(S) {
+    var rootNode = new Node(0, 0), n = S.length;
+    for (var i = 0; i < n; i++) {
+      var node = rootNode, k = i;
+      for (;;) {
+        var c = S[k], child = node.kids.get(c);
+        if (!child) {
+          var leaf = new Node(k, n); leaf.suffix = i;
+          node.kids.set(c, leaf);
+          break;
+        }
+        var len = child.end - child.start, j = 0;
+        while (j < len && S[child.start + j] === S[k + j]) j++;
+        if (j === len) { node = child; k += len; continue; }
+        var mid = new Node(child.start, child.start + j);
+        node.kids.set(c, mid);
+        child.start += j;
+        mid.kids.set(S[child.start], child);
+        var leaf2 = new Node(k + j, n); leaf2.suffix = i;
+        mid.kids.set(S[k + j], leaf2);
+        break;
+      }
+    }
+    return rootNode;
+  }
+
+  // Desciende por el árbol siguiendo el patrón. Devuelve null si no existe.
+  function search(rootNode, S, p) {
+    var node = rootNode, i = 0, path = [];
+    while (i < p.length) {
+      var child = node.kids.get(p[i]);
+      if (!child) return null;
+      var len = child.end - child.start, j = 0;
+      while (j < len && i + j < p.length) {
+        if (S[child.start + j] !== p[i + j]) return null;
+        j++;
+      }
+      path.push(child);
+      node = child; i += j;
+    }
+    return { node: node, path: path };
+  }
+
+  function leavesUnder(node) {
+    var out = [], stack = [node];
+    while (stack.length) {
+      var x = stack.pop();
+      if (x.kids.size === 0) out.push(x); else x.kids.forEach(function (v) { stack.push(v); });
+    }
+    return out;
+  }
+
+  function intervals(positions, m) {
+    var ps = positions.slice().sort(function (a, b) { return a - b; }), out = [];
+    ps.forEach(function (s) {
+      var e = s + m, last = out[out.length - 1];
+      if (last && s <= last[1]) last[1] = Math.max(last[1], e); else out.push([s, e]);
+    });
+    return out;
+  }
+
+  function norm(s, ci) {
+    if (!ci) return s;
+    var o = '';
+    for (var ch of s) { var l = ch.toLowerCase(); o += (l.length === ch.length) ? l : ch; }
+    return o;
+  }
+
+  function countNodes(nd) {
+    var c = 1; nd.kids.forEach(function (v) { c += countNodes(v); }); return c;
+  }
+
+  root.SuffixCore = { build: build, search: search, leavesUnder: leavesUnder,
+                      intervals: intervals, norm: norm, SENT: SENT, countNodes: countNodes };
+
+  if (typeof document === 'undefined') return; // modo prueba (Node)
+
+  /* ---------- Interfaz ---------- */
+  var $ = function (id) { return document.getElementById(id); };
+  var txt = $('txt'), pat = $('pat'), ci = $('ci');
+  var MAX_DRAW = 90;
+
+  function esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function disp(s) {
+    return s.replace(/\u0001/g, '$').replace(/ /g, '␣').replace(/\n/g, '↵');
+  }
+
+  var NS = 'http://www.w3.org/2000/svg';
+  function el(name, attrs, text) {
+    var e = document.createElementNS(NS, name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  function drawTree(rootNode, S, pathSet, hitLeaves) {
+    var svg = $('svg');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var MAXLAB = 8, CW = 7.3, DY = 66, PADY = 24, leafX = 0, maxD = 0;
+    function labelOf(c) {
+      var l = disp(S.slice(c.start, c.end));
+      return l.length > MAXLAB ? l.slice(0, MAXLAB - 1) + '…' : l;
+    }
+    var maxLab = 1;
+    (function m(nd) {
+      nd.kids.forEach(function (c) { maxLab = Math.max(maxLab, labelOf(c).length); m(c); });
+    })(rootNode);
+    // El espacio entre hojas se adapta a la etiqueta más ancha, para que nunca se pisen
+    var DX = Math.max(48, Math.ceil(maxLab * CW) + 16), PADX = Math.ceil(DX / 2) + 4;
+
+    function order(nd) {
+      return Array.from(nd.kids.values()).sort(function (a, b) {
+        return S[a.start] < S[b.start] ? -1 : 1;
+      });
+    }
+    function lay(nd, d) {
+      nd.d = d; if (d > maxD) maxD = d;
+      if (nd.kids.size === 0) { nd.x = leafX++; return; }
+      var ks = order(nd), sum = 0;
+      ks.forEach(function (c) { lay(c, d + 1); sum += c.x; });
+      nd.x = sum / ks.length;
+    }
+    lay(rootNode, 0);
+
+    var W = Math.max(Math.max(leafX - 1, 0) * DX + PADX * 2, 200), H = (maxD + 1) * DY + PADY;
+    svg.setAttribute('width', W); svg.setAttribute('height', H);
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    var px = function (nd) { return PADX + nd.x * DX + DX / 2 - DX / 2; };
+    var py = function (nd) { return PADY + nd.d * DY; };
+
+    var gE = el('g', {}), gL = el('g', {}), gN = el('g', {});
+    svg.appendChild(gE); svg.appendChild(gL); svg.appendChild(gN);
+
+    (function walk(nd) {
+      order(nd).forEach(function (c) {
+        var hit = pathSet.has(c);
+        var x1 = px(nd), y1 = py(nd), x2 = px(c), y2 = py(c);
+        gE.appendChild(el('line', { x1: x1, y1: y1, x2: x2, y2: y2, class: 'edge' + (hit ? ' hit' : '') }));
+        // La etiqueta va justo encima del nodo hijo: dos hermanos nunca comparten esa posición
+        var tx = el('text', { x: x2, y: y2 - (c.kids.size ? 12 : 19), 'text-anchor': 'middle',
+          class: 'elabel' + (hit ? ' hit' : '') }, labelOf(c));
+        tx.appendChild(el('title', {}, disp(S.slice(c.start, c.end))));
+        gL.appendChild(tx);
+        walk(c);
+      });
+      var leaf = nd.kids.size === 0;
+      if (leaf) {
+        var h = hitLeaves.has(nd);
+        gN.appendChild(el('circle', { cx: px(nd), cy: py(nd), r: 13, class: 'nleaf' + (h ? ' hit' : '') }));
+        gN.appendChild(el('text', { x: px(nd), y: py(nd), class: 'lnum' }, String(nd.suffix)));
+      } else {
+        gN.appendChild(el('circle', { cx: px(nd), cy: py(nd), r: 6,
+          class: 'nint' + (pathSet.has(nd) ? ' hit' : '') }));
+      }
+    })(rootNode);
+    // la raíz también cuenta como parte del camino si hay búsqueda
+    if (pathSet.size) gN.appendChild(el('circle', { cx: px(rootNode), cy: py(rootNode), r: 6, class: 'nint hit' }));
+  }
+
+  function run() {
+    var text = txt.value, p = pat.value, ignore = ci.checked;
+    var S = norm(text, ignore).replace(/\u0001/g, ' ') + SENT;
+    var P = norm(p, ignore);
+
+    var t0 = performance.now();
+    var tree = build(S);
+    var tBuild = performance.now() - t0;
+
+    var res = P.length ? search(tree, S, P) : null;
+    var pathSet = new Set(), hitLeaves = new Set(), positions = [];
+    if (res) {
+      res.path.forEach(function (n) { pathSet.add(n); });
+      leavesUnder(res.node).forEach(function (l) { hitLeaves.add(l); positions.push(l.suffix); });
+    }
+
+    // texto con coincidencias en rojo
+    var out = '', last = 0;
+    if (res) {
+      intervals(positions, P.length).forEach(function (iv) {
+        out += esc(text.slice(last, iv[0])) + '<mark>' + esc(text.slice(iv[0], iv[1])) + '</mark>';
+        last = iv[1];
+      });
+    }
+    out += esc(text.slice(last));
+    $('result').innerHTML = out || '<span class="note">Escriba un texto arriba.</span>';
+
+    var stats;
+    if (!P.length) stats = 'Escriba un patrón para buscar.';
+    else if (!res) stats = '<b>0</b> coincidencias: el patrón se salió del árbol.';
+    else stats = '<b>' + positions.length + '</b> coincidencia' + (positions.length === 1 ? '' : 's') +
+      ' en las posiciones ' + positions.slice().sort(function (a, b) { return a - b; }).join(', ');
+    stats += ' &middot; árbol: ' + countNodes(tree) + ' nodos (construido en ' + tBuild.toFixed(2) + ' ms)';
+    $('stats').innerHTML = stats;
+
+    var note = $('treenote');
+    if (text.length > MAX_DRAW) {
+      $('svg').setAttribute('width', 0); $('svg').setAttribute('height', 0);
+      while ($('svg').firstChild) $('svg').removeChild($('svg').firstChild);
+      note.textContent = '(se dibuja solo con textos de hasta ' + MAX_DRAW + ' caracteres; la búsqueda sigue funcionando)';
+    } else {
+      note.textContent = '';
+      drawTree(tree, S, pathSet, hitLeaves);
+    }
+  }
+
+  txt.addEventListener('input', run);
+  pat.addEventListener('input', run);
+  ci.addEventListener('change', run);
+  document.querySelectorAll('.chip').forEach(function (b) {
+    b.addEventListener('click', function () {
+      txt.value = b.dataset.t; pat.value = b.dataset.p; run();
+    });
+  });
+  run();
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+</body>
+</html>
